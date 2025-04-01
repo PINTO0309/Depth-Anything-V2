@@ -1,0 +1,36 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "onnx_indoor",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            "justMyCode": false,
+            "args": [
+                "--input-size", "518",
+                "--encoder", "vits",
+                "--load-from", "checkpoints/depth_anything_v2_metric_hypersim_vits.pth",
+                "--export-onnx",
+            ]
+        },
+        {
+            "name": "onnx_outdoor",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            "justMyCode": false,
+            "args": [
+                "--input-size", "518",
+                "--encoder", "vits",
+                "--load-from", "checkpoints/depth_anything_v2_metric_vkitti_vits.pth",
+                "--export-onnx",
+            ]
+        }
+
+    ]
+}
