@@ -42,11 +42,13 @@ class DPTHead(nn.Module):
         features=256, 
         use_bn=False, 
         out_channels=[256, 512, 1024, 1024], 
-        use_clstoken=False
+        use_clstoken=False,
+        patch_size=14
     ):
         super(DPTHead, self).__init__()
         
         self.use_clstoken = use_clstoken
+        self.patch_size = patch_size
         
         self.projects = nn.ModuleList([
             nn.Conv2d(
@@ -114,6 +116,22 @@ class DPTHead(nn.Module):
         )
     
     def forward(self, out_features, patch_h, patch_w):
+        sample = out_features[0][0] if isinstance(out_features[0], tuple) else out_features[0]
+        device = sample.device
+        dtype = torch.int64
+
+        if not torch.is_tensor(patch_h):
+            patch_h_tensor = torch.tensor(patch_h, device=device, dtype=dtype)
+        else:
+            patch_h_tensor = patch_h.to(device=device, dtype=dtype)
+        if not torch.is_tensor(patch_w):
+            patch_w_tensor = torch.tensor(patch_w, device=device, dtype=dtype)
+        else:
+            patch_w_tensor = patch_w.to(device=device, dtype=dtype)
+
+        patch_h_tensor = torch.clamp(patch_h_tensor, min=1)
+        patch_w_tensor = torch.clamp(patch_w_tensor, min=1)
+
         out = []
         for i, x in enumerate(out_features):
             if self.use_clstoken:
@@ -123,7 +141,8 @@ class DPTHead(nn.Module):
             else:
                 x = x[0]
             
-            x = x.permute(0, 2, 1).reshape((x.shape[0], x.shape[-1], patch_h, patch_w))
+            x = x.permute(0, 2, 1)
+            x = x.reshape((x.shape[0], x.shape[1], patch_h_tensor, patch_w_tensor))
             
             x = self.projects[i](x)
             x = self.resize_layers[i](x)
@@ -143,9 +162,11 @@ class DPTHead(nn.Module):
         path_1 = self.scratch.refinenet1(path_2, layer_1_rn)
         
         out = self.scratch.output_conv1(path_1)
-        out = F.interpolate(out, (int(patch_h * 14), int(patch_w * 14)), mode="bilinear", align_corners=True)
+        target_h = (patch_h_tensor * self.patch_size).to(device=out.device, dtype=torch.int64)
+        target_w = (patch_w_tensor * self.patch_size).to(device=out.device, dtype=torch.int64)
+        out = F.interpolate(out, (target_h, target_w), mode="bilinear", align_corners=True)
         out = self.scratch.output_conv2(out)
-        
+
         return out
 
 
@@ -173,15 +194,25 @@ class DepthAnythingV2(nn.Module):
         self.encoder = encoder
         self.pretrained = DINOv2(model_name=encoder)
         
-        self.depth_head = DPTHead(self.pretrained.embed_dim, features, use_bn, out_channels=out_channels, use_clstoken=use_clstoken)
+        self.depth_head = DPTHead(
+            self.pretrained.embed_dim,
+            features,
+            use_bn,
+            out_channels=out_channels,
+            use_clstoken=use_clstoken,
+            patch_size=self.pretrained.patch_size,
+        )
     
     def forward(self, x):
-        patch_h, patch_w = x.shape[-2] // 14, x.shape[-1] // 14
+        spatial_shape = torch._shape_as_tensor(x)
+        patch_size = torch.tensor(self.pretrained.patch_size, device=spatial_shape.device, dtype=spatial_shape.dtype)
+        patch_shape = torch.div(spatial_shape[-2:], patch_size, rounding_mode='floor')
+        patch_h, patch_w = patch_shape[0], patch_shape[1]
         
         features = self.pretrained.get_intermediate_layers(x, self.intermediate_layer_idx[self.encoder], return_class_token=True)
         
         depth = self.depth_head(features, patch_h, patch_w) * self.max_depth
-        
+
         return depth.squeeze(1)
     
     @torch.no_grad()

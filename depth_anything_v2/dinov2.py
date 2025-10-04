@@ -180,37 +180,54 @@ class DinoVisionTransformer(nn.Module):
         previous_dtype = x.dtype
         npatch = x.shape[1] - 1
         N = self.pos_embed.shape[1] - 1
-        if npatch == N and w == h:
-            return self.pos_embed
         pos_embed = self.pos_embed.float()
         class_pos_embed = pos_embed[:, 0]
         patch_pos_embed = pos_embed[:, 1:]
         dim = x.shape[-1]
-        w0 = w // self.patch_size
-        h0 = h // self.patch_size
-        # we add a small number to avoid floating point error in the interpolation
-        # see discussion at https://github.com/facebookresearch/dino/issues/8
-        # DINOv2 with register modify the interpolate_offset from 0.1 to 0.0
-        w0, h0 = w0 + self.interpolate_offset, h0 + self.interpolate_offset
-        # w0, h0 = w0 + 0.1, h0 + 0.1
-        
-        sqrt_N = math.sqrt(N)
-        sx, sy = float(w0) / sqrt_N, float(h0) / sqrt_N
+
+        sqrt_N = int(math.sqrt(N))
+        patch_pos_embed = patch_pos_embed.reshape(1, sqrt_N, sqrt_N, dim).permute(0, 3, 1, 2)
+
+        device = patch_pos_embed.device
+        if not torch.is_tensor(w):
+            w_tensor = torch.tensor(w, device=device, dtype=torch.int64)
+        else:
+            w_tensor = w.to(device=device, dtype=torch.int64)
+        if not torch.is_tensor(h):
+            h_tensor = torch.tensor(h, device=device, dtype=torch.int64)
+        else:
+            h_tensor = h.to(device=device, dtype=torch.int64)
+
+        patch_size = torch.tensor(self.patch_size, device=device, dtype=torch.int64)
+        w0 = torch.div(w_tensor, patch_size, rounding_mode='floor')
+        h0 = torch.div(h_tensor, patch_size, rounding_mode='floor')
+
+        w0 = torch.clamp(w0, min=1)
+        h0 = torch.clamp(h0, min=1)
+
+        if torch.is_tensor(w0):
+            target_w = w0.to(device=device, dtype=torch.int64)
+        else:
+            target_w = torch.tensor(int(w0), device=device, dtype=torch.int64)
+        if torch.is_tensor(h0):
+            target_h = h0.to(device=device, dtype=torch.int64)
+        else:
+            target_h = torch.tensor(int(h0), device=device, dtype=torch.int64)
+
         patch_pos_embed = nn.functional.interpolate(
-            patch_pos_embed.reshape(1, int(sqrt_N), int(sqrt_N), dim).permute(0, 3, 1, 2),
-            scale_factor=(sx, sy),
-            # (int(w0), int(h0)), # to solve the upsampling shape issue
+            patch_pos_embed,
+            size=(target_w, target_h),
             mode="bicubic",
-            antialias=self.interpolate_antialias
+            antialias=self.interpolate_antialias,
         )
-        
-        assert int(w0) == patch_pos_embed.shape[-2]
-        assert int(h0) == patch_pos_embed.shape[-1]
-        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).reshape(1, -1, dim)
         return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1).to(previous_dtype)
 
     def prepare_tokens_with_masks(self, x, masks=None):
-        B, nc, w, h = x.shape
+        spatial_shape = torch._shape_as_tensor(x)
+        w = spatial_shape[-2]
+        h = spatial_shape[-1]
         x = self.patch_embed(x)
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
